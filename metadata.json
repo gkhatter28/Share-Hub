@@ -1,0 +1,6 @@
+{
+  "name": "CipherVault",
+  "description": "End-to-end encrypted cross-platform file sharing with lossless large uploads, offline sync, granular folder permissions, automated backups, and team analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
