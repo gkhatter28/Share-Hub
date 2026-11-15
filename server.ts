@@ -697,7 +697,16 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+  const urlPath = (request.url || '').split('?')[0];
+  if (urlPath === '/ws') {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  }
+});
 
 function broadcastPush(event: PushEvent): void {
   const serialized = JSON.stringify(event);
@@ -1322,8 +1331,12 @@ app.post('/api/backups/:id/restore', (req, res) => {
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
+    const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: hmrDisabled ? false : { server },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

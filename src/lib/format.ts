@@ -1,5 +1,19 @@
 import type { ActivityAction, CloudStorageTarget, ConnectedDevice, FolderRole } from '@/src/types/vault';
 
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+
+export function apiUrl(path: string): string {
+  return API_BASE ? `${API_BASE}${path}` : path;
+}
+
+export function wsUrl(path: string): string {
+  if (API_BASE) {
+    return `${API_BASE.replace(/^http/, 'ws')}${path}`;
+  }
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.host}${path}`;
+}
+
 export function formatBytes(bytes: number, decimals = 1): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
   const k = 1024;

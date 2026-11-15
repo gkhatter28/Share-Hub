@@ -15,7 +15,7 @@ import {
   exportKeyB64Url,
   getFileKeyFromKeyring,
 } from '@/src/lib/crypto';
-import { formatBytes, formatTimestamp, STORAGE_LABELS } from '@/src/lib/format';
+import { apiUrl, formatBytes, formatTimestamp, STORAGE_LABELS } from '@/src/lib/format';
 import { getOfflineCachedBlob } from '@/src/lib/offlineDb';
 import type { VaultFile } from '@/src/types/vault';
 
@@ -86,7 +86,7 @@ export const FileInspectorModal: React.FC<FileInspectorModalProps> = ({
           if (isOfflineMode) {
             throw new Error('Travel offline mode enabled');
           }
-          const res = await fetch(`/api/files/${file.id}/blob`);
+          const res = await fetch(apiUrl(`/api/files/${file.id}/blob`));
           if (!res.ok) throw new Error('Unable to download encrypted payload from vault');
           ciphertext = await res.arrayBuffer();
           setSourceUsed('cloud-vault');

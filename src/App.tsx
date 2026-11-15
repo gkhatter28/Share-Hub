@@ -30,7 +30,7 @@ import { UploadModal, type UploadJobProgress } from '@/src/components/UploadModa
 import { VaultExplorer } from '@/src/components/VaultExplorer';
 import { MEMBER_AVATARS } from '@/src/lib/avatars';
 import { encryptFileLossless, saveKeyToKeyring } from '@/src/lib/crypto';
-import { detectCurrentDevice, formatBytes, formatRelativeTime } from '@/src/lib/format';
+import { apiUrl, detectCurrentDevice, formatBytes, formatRelativeTime, wsUrl } from '@/src/lib/format';
 import {
   cacheEncryptedBlobOffline,
   enqueueOfflineAction,
@@ -42,6 +42,7 @@ import {
   removeOfflineQueueItem,
   saveOfflineWorkspaceSnapshot,
 } from '@/src/lib/offlineDb';
+import { createStandaloneOfflineSeed } from '@/src/lib/offlineVaultSeed';
 import type {
   BackupPolicy,
   CloudConnector,
@@ -159,7 +160,7 @@ export default function App() {
           (f) => pinnedFolderIds.has(f.folderId) && !existingSet.has(f.id),
         );
         for (const file of toCache.slice(0, 6)) {
-          const res = await fetch(`/api/files/${file.id}/blob`);
+          const res = await fetch(apiUrl(`/api/files/${file.id}/blob`));
           if (res.ok) {
             const ciphertext = await res.arrayBuffer();
             await cacheEncryptedBlobOffline({
@@ -184,25 +185,29 @@ export default function App() {
 
   const fetchVaultState = useCallback(async () => {
     try {
-      const res = await fetch('/api/vault/state');
+      const res = await fetch(apiUrl('/api/vault/state'));
       if (!res.ok) throw new Error('Failed to fetch vault state');
       const data = (await res.json()) as VaultStatePayload;
       setVaultState(data);
       setLoadError(null);
       await saveOfflineWorkspaceSnapshot(data);
       void cachePinnedFoldersOffline(data);
-    } catch (err) {
+    } catch {
       const cached = await loadOfflineWorkspaceSnapshot();
       if (cached) {
         setVaultState(cached);
         setLoadError(null);
       } else {
-        setLoadError(err instanceof Error ? err.message : 'Unable to connect to CipherVault');
+        const standalone = await createStandaloneOfflineSeed();
+        setVaultState(standalone);
+        setIsTravelMode(true);
+        setLoadError(null);
+        await refreshOfflineStores();
       }
     } finally {
       setLoading(false);
     }
-  }, [cachePinnedFoldersOffline]);
+  }, [cachePinnedFoldersOffline, refreshOfflineStores]);
 
   // Initial load + device registration + share link check
   useEffect(() => {
@@ -211,7 +216,7 @@ export default function App() {
 
     // Register current browser endpoint
     if (navigator.onLine) {
-      void fetch('/api/devices/register', {
+      void fetch(apiUrl('/api/devices/register'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(currentDevice),
@@ -224,7 +229,7 @@ export default function App() {
     const hashMatch = window.location.hash.match(/key=([^&]+)/);
     const keyFragment = hashMatch ? decodeURIComponent(hashMatch[1]) : undefined;
     if (shareToken) {
-      fetch(`/api/share/${encodeURIComponent(shareToken)}`)
+      fetch(apiUrl(`/api/share/${encodeURIComponent(shareToken)}`))
         .then((r) => (r.ok ? r.json() : null))
         .then((data: { file?: VaultFile } | null) => {
           if (data?.file) {
@@ -252,7 +257,7 @@ export default function App() {
       onChunkProgress?: (pct: number, chunkIdx: number, totalChunks: number) => void;
     }): Promise<VaultFile> => {
       const totalChunks = Math.max(1, Math.ceil(params.ciphertext.byteLength / CHUNK_SIZE_BYTES));
-      const initRes = await fetch('/api/upload/init', {
+      const initRes = await fetch(apiUrl('/api/upload/init'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -278,7 +283,7 @@ export default function App() {
         const start = idx * CHUNK_SIZE_BYTES;
         const end = Math.min(params.ciphertext.byteLength, start + CHUNK_SIZE_BYTES);
         const slice = params.ciphertext.slice(start, end);
-        const chunkRes = await fetch(`/api/upload/chunk/${uploadId}/${idx}`, {
+        const chunkRes = await fetch(apiUrl(`/api/upload/chunk/${uploadId}/${idx}`), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/octet-stream' },
           body: slice,
@@ -288,7 +293,7 @@ export default function App() {
         params.onChunkProgress?.(pct, idx + 1, totalChunks);
       }
 
-      const compRes = await fetch('/api/upload/complete', {
+      const compRes = await fetch(apiUrl('/api/upload/complete'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ uploadId, isOfflineSync: params.isOfflineSync }),
@@ -340,7 +345,7 @@ export default function App() {
           });
           await removeOfflineCachedBlob(item.tempFile.id);
         } else if (item.type === 'createFolder') {
-          await fetch('/api/folders', {
+          await fetch(apiUrl('/api/folders'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -352,7 +357,7 @@ export default function App() {
             }),
           });
         } else if (item.type === 'updatePermissions') {
-          await fetch(`/api/folders/${item.folderId}/permissions`, {
+          await fetch(apiUrl(`/api/folders/${item.folderId}/permissions`), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -361,7 +366,7 @@ export default function App() {
             }),
           });
         } else if (item.type === 'deleteFile') {
-          await fetch(`/api/files/${item.fileId}`, { method: 'DELETE' });
+          await fetch(apiUrl(`/api/files/${item.fileId}`), { method: 'DELETE' });
         }
         await removeOfflineQueueItem(item.id);
       }
@@ -395,8 +400,7 @@ export default function App() {
     let closedByCleanup = false;
 
     const connect = () => {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+      ws = new WebSocket(wsUrl('/ws'));
       ws.onmessage = (msg) => {
         try {
           const event = JSON.parse(msg.data as string) as PushEvent;
@@ -671,7 +675,7 @@ export default function App() {
     if (offlineCachedIds.has(file.id)) {
       await removeOfflineCachedBlob(file.id);
     } else if (!isOfflineMode) {
-      const res = await fetch(`/api/files/${file.id}/blob`);
+      const res = await fetch(apiUrl(`/api/files/${file.id}/blob`));
       if (res.ok) {
         const ciphertext = await res.arrayBuffer();
         await cacheEncryptedBlobOffline({
@@ -704,7 +708,7 @@ export default function App() {
       await refreshOfflineStores();
       return;
     }
-    await fetch(`/api/files/${file.id}`, { method: 'DELETE' });
+    await fetch(apiUrl(`/api/files/${file.id}`), { method: 'DELETE' });
     await removeOfflineCachedBlob(file.id);
     await refreshOfflineStores();
     await fetchVaultState();
@@ -750,7 +754,7 @@ export default function App() {
       await refreshOfflineStores();
       return;
     }
-    await fetch('/api/folders', {
+    await fetch(apiUrl('/api/folders'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -785,7 +789,7 @@ export default function App() {
       await refreshOfflineStores();
       return;
     }
-    await fetch(`/api/folders/${folderId}/permissions`, {
+    await fetch(apiUrl(`/api/folders/${folderId}/permissions`), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ permissions, summary }),
@@ -797,7 +801,7 @@ export default function App() {
     folderId: string,
     updates: Partial<VaultFolder>,
   ) => {
-    await fetch(`/api/folders/${folderId}`, {
+    await fetch(apiUrl(`/api/folders/${folderId}`), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
@@ -807,7 +811,7 @@ export default function App() {
 
   const handleLogDecryption = async (fileId: string, mode: 'preview' | 'download') => {
     if (isOfflineMode) return;
-    await fetch(`/api/files/${fileId}/decrypted-event`, {
+    await fetch(apiUrl(`/api/files/${fileId}/decrypted-event`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -823,7 +827,7 @@ export default function App() {
     fileId: string,
     opts: { expiresInHours: number; maxDownloads: number; requiresPassphrase: boolean },
   ): Promise<string> => {
-    const res = await fetch(`/api/files/${fileId}/share`, {
+    const res = await fetch(apiUrl(`/api/files/${fileId}/share`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(opts),
@@ -847,7 +851,7 @@ export default function App() {
     setIsSyncing(true);
     try {
       await flushOfflineQueue();
-      await fetch(`/api/devices/${currentDevice.id}/sync`, { method: 'POST' }).catch(() => {});
+      await fetch(apiUrl(`/api/devices/${currentDevice.id}/sync`), { method: 'POST' }).catch(() => {});
       await fetchVaultState();
     } finally {
       setIsSyncing(false);
@@ -855,7 +859,7 @@ export default function App() {
   };
 
   const handleSyncSingleDevice = async (deviceId: string) => {
-    await fetch(`/api/devices/${deviceId}/sync`, { method: 'POST' });
+    await fetch(apiUrl(`/api/devices/${deviceId}/sync`), { method: 'POST' });
     await fetchVaultState();
   };
 
@@ -863,7 +867,7 @@ export default function App() {
     id: CloudStorageTarget,
     updates: Partial<CloudConnector>,
   ) => {
-    await fetch(`/api/storage/${id}`, {
+    await fetch(apiUrl(`/api/storage/${id}`), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
@@ -872,7 +876,7 @@ export default function App() {
   };
 
   const handleRunBackup = async () => {
-    await fetch('/api/backups/run', {
+    await fetch(apiUrl('/api/backups/run'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'manual' }),
@@ -881,7 +885,7 @@ export default function App() {
   };
 
   const handleUpdatePolicy = async (updates: Partial<BackupPolicy>) => {
-    await fetch('/api/backups/policy', {
+    await fetch(apiUrl('/api/backups/policy'), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(updates),
@@ -890,7 +894,7 @@ export default function App() {
   };
 
   const handleRestoreSnapshot = async (snapshotId: string) => {
-    await fetch(`/api/backups/${snapshotId}/restore`, { method: 'POST' });
+    await fetch(apiUrl(`/api/backups/${snapshotId}/restore`), { method: 'POST' });
     await fetchVaultState();
   };
 
